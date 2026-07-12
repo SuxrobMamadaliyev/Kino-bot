@@ -7,7 +7,6 @@ const { checkSubscription } = require('./checkSubscription');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
-const PUBLIC_CHANNEL = process.env.PUBLIC_CHANNEL;
 
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN environment variable topilmadi');
 if (!ADMIN_ID) throw new Error('ADMIN_ID environment variable topilmadi');
@@ -105,6 +104,7 @@ function adminMainMenu() {
     [Markup.button.callback('📊 Statistika', 'admin_stats')],
     [Markup.button.callback('📢 Majburiy Obuna', 'admin_subs_menu')],
     [Markup.button.callback('🎬 Kino qo\'shish', 'admin_add_movie')],
+    [Markup.button.callback('🗂 Kinolar ro\'yxati', 'admin_movies_list_0')],
     [Markup.button.callback('✉️ Reklama yuborish', 'admin_broadcast')],
   ]);
 }
@@ -133,19 +133,25 @@ bot.action('admin_stats', async (ctx) => {
   if (!isAdmin(ctx)) return;
   await ctx.answerCbQuery();
 
-  const [total, active, blocked, moviesCount] = await Promise.all([
+  const [total, active, blocked, moviesCount, viewsAgg, topMovie] = await Promise.all([
     User.countDocuments({}),
     User.countDocuments({ status: 'active' }),
     User.countDocuments({ status: 'blocked' }),
     Movie.countDocuments({}),
+    Movie.aggregate([{ $group: { _id: null, total: { $sum: '$views' } } }]),
+    Movie.findOne().sort({ views: -1 }),
   ]);
+
+  const totalViews = viewsAgg[0]?.total || 0;
 
   const text =
     `📊 *Statistika*\n\n` +
     `👥 Jami foydalanuvchilar: ${total}\n` +
     `✅ Faol: ${active}\n` +
     `🚫 Bloklagan: ${blocked}\n` +
-    `🎬 Jami kinolar: ${moviesCount}`;
+    `🎬 Jami kinolar: ${moviesCount}\n` +
+    `👁 Jami ko'rishlar: ${totalViews}` +
+    (topMovie ? `\n🏆 Eng ko'p ko'rilgan: ${topMovie.code} (${topMovie.views} marta)` : '');
 
   try {
     await ctx.editMessageText(text, {
@@ -261,6 +267,108 @@ bot.action('admin_add_movie', async (ctx) => {
   await ctx.reply(
     "🎬 Kino qo'shish:\n\nVideoni caption (izoh) bilan birga shu yerga yuboring.\n\nBekor qilish uchun /admin yuboring."
   );
+});
+
+// ---------------------------------------------------------------------------
+// 🗂 Kinolar ro'yxati (sahifalangan, ko'rilgan soni bilan)
+// ---------------------------------------------------------------------------
+const MOVIES_PER_PAGE = 8;
+
+async function renderMoviesListPage(page) {
+  const totalCount = await Movie.countDocuments({});
+  const totalPages = Math.max(1, Math.ceil(totalCount / MOVIES_PER_PAGE));
+  const safePage = Math.min(Math.max(page, 0), totalPages - 1);
+
+  const movies = await Movie.find({})
+    .sort({ createdAt: -1 })
+    .skip(safePage * MOVIES_PER_PAGE)
+    .limit(MOVIES_PER_PAGE)
+    .lean();
+
+  if (movies.length === 0) {
+    return {
+      text: "🗂 Hozircha bazada kino yo'q.",
+      keyboard: Markup.inlineKeyboard([[Markup.button.callback('⬅️ Orqaga', 'admin_back')]]),
+    };
+  }
+
+  const text =
+    `🗂 *Kinolar ro'yxati* (${totalCount} ta, sahifa ${safePage + 1}/${totalPages})\n\n` +
+    'Tafsilot va o\'chirish uchun kodni bosing:';
+
+  const movieButtons = movies.map((m) => [
+    Markup.button.callback(`🎬 ${m.code} — 👁 ${m.views || 0}`, `movie_detail_${m.code}`),
+  ]);
+
+  const navRow = [];
+  if (safePage > 0) navRow.push(Markup.button.callback('⬅️', `admin_movies_list_${safePage - 1}`));
+  if (safePage < totalPages - 1) navRow.push(Markup.button.callback('➡️', `admin_movies_list_${safePage + 1}`));
+  if (navRow.length) movieButtons.push(navRow);
+
+  movieButtons.push([Markup.button.callback('⬅️ Orqaga', 'admin_back')]);
+
+  return { text, keyboard: Markup.inlineKeyboard(movieButtons) };
+}
+
+bot.action(/^admin_movies_list_(\d+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.answerCbQuery();
+  const page = Number(ctx.match[1]) || 0;
+  const { text, keyboard } = await renderMoviesListPage(page);
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+  } catch (e) {
+    await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+  }
+});
+
+// 🎬 Bitta kino tafsiloti
+bot.action(/^movie_detail_(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.answerCbQuery();
+
+  const code = ctx.match[1];
+  const movie = await Movie.findOne({ code });
+
+  if (!movie) {
+    return ctx.reply("⚠️ Bu kino topilmadi (o'chirilgan bo'lishi mumkin).");
+  }
+
+  const text =
+    `🎬 *Kino tafsiloti*\n\n` +
+    `🔢 Kod: ${movie.code}\n` +
+    `👁 Ko'rilgan: ${movie.views || 0} marta\n` +
+    `📝 Izoh: ${movie.caption ? movie.caption : '—'}\n` +
+    `🗓 Qo'shilgan: ${movie.createdAt.toLocaleDateString('uz-UZ')}`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("🗑 O'chirish", `movie_delete_${movie.code}`)],
+    [Markup.button.callback('⬅️ Ro\'yxatga qaytish', 'admin_movies_list_0')],
+  ]);
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: 'Markdown', ...keyboard });
+  } catch (e) {
+    await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+  }
+});
+
+// 🗑 Kinoni o'chirish
+bot.action(/^movie_delete_(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.answerCbQuery();
+
+  const code = ctx.match[1];
+  const result = await Movie.deleteOne({ code });
+
+  if (result.deletedCount === 0) {
+    await ctx.reply('⚠️ Kino topilmadi yoki allaqachon o\'chirilgan.');
+  } else {
+    await ctx.reply(`✅ Kino ("${code}") bazadan o'chirildi.`);
+  }
+
+  const { text, keyboard } = await renderMoviesListPage(0);
+  await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
 });
 
 // ---------------------------------------------------------------------------
@@ -389,22 +497,12 @@ bot.on('message', async (ctx, next) => {
       caption: adminState.temp.caption,
     });
 
-    await ctx.reply(`✅ Kino bazaga saqlandi!\nKodi: ${movie.code}`);
-
-    // Asosiy kanalga avtomatik post qilish
-    if (PUBLIC_CHANNEL) {
-      try {
-        await bot.telegram.sendMessage(
-          PUBLIC_CHANNEL,
-          `🍿 Yangi kino!\nKodi: ${movie.code}`
-        );
-      } catch (err) {
-        console.error('❌ PUBLIC_CHANNEL ga post qilishda xato:', err.message);
-        await ctx.reply(
-          "⚠️ Kino bazaga saqlandi, ammo asosiy kanalga post qilinmadi. Botning kanalda admin ekanligini tekshiring."
-        );
-      }
-    }
+    await ctx.reply(
+      `✅ Kino bazaga saqlandi!\n\n` +
+        `🔢 Kod: ${movie.code}\n` +
+        `📝 Izoh: ${movie.caption ? movie.caption : '—'}\n` +
+        `👁 Ko'rilgan: 0 marta`
+    );
 
     resetAdminState();
     return;
@@ -441,7 +539,13 @@ bot.on('text', async (ctx) => {
     return ctx.reply("❌ Bunday kodga ega kino topilmadi. Kodni tekshirib qaytadan urinib ko'ring.");
   }
 
-  await ctx.replyWithVideo(movie.file_id, { caption: movie.caption || `Kodi: ${movie.code}` });
+  movie.views = (movie.views || 0) + 1;
+  await movie.save();
+
+  const baseCaption = movie.caption || `Kodi: ${movie.code}`;
+  const caption = `${baseCaption}\n\n👁 Ko'rilgan: ${movie.views} marta`;
+
+  await ctx.replyWithVideo(movie.file_id, { caption });
 });
 
 module.exports = bot;
