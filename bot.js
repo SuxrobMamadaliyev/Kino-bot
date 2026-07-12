@@ -18,7 +18,7 @@ const bot = new Telegraf(BOT_TOKEN);
 // Faqat ADMIN_ID ishlatadi, shuning uchun bitta global obyekt yetarli.
 // ---------------------------------------------------------------------------
 const adminState = {
-  mode: null, // 'ADD_CHANNEL_WAIT_FORWARD' | 'ADD_CHANNEL_WAIT_LINK' | 'ADD_MOVIE_WAIT_CODE' | 'BROADCAST_WAIT_MESSAGE'
+  mode: null, // 'ADD_CHANNEL_WAIT_FORWARD' | 'ADD_CHANNEL_WAIT_LINK' | 'ADD_MOVIE_WAIT_CODE' | 'BROADCAST_WAIT_MESSAGE' | 'EDIT_CAPTION_WAIT_TEXT'
   temp: {},
 };
 
@@ -342,6 +342,7 @@ bot.action(/^movie_detail_(.+)$/, async (ctx) => {
     `🗓 Qo'shilgan: ${movie.createdAt.toLocaleDateString('uz-UZ')}`;
 
   const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('✏️ Izohni o\'zgartirish', `movie_edit_caption_${movie.code}`)],
     [Markup.button.callback("🗑 O'chirish", `movie_delete_${movie.code}`)],
     [Markup.button.callback('⬅️ Ro\'yxatga qaytish', 'admin_movies_list_0')],
   ]);
@@ -369,6 +370,28 @@ bot.action(/^movie_delete_(.+)$/, async (ctx) => {
 
   const { text, keyboard } = await renderMoviesListPage(0);
   await ctx.reply(text, { parse_mode: 'Markdown', ...keyboard });
+});
+
+// ✏️ Kino izohini o'zgartirish - boshlash
+bot.action(/^movie_edit_caption_(.+)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.answerCbQuery();
+
+  const code = ctx.match[1];
+  const movie = await Movie.findOne({ code });
+  if (!movie) return ctx.reply('⚠️ Kino topilmadi.');
+
+  resetAdminState();
+  adminState.mode = 'EDIT_CAPTION_WAIT_TEXT';
+  adminState.temp.code = code;
+
+  const currentCaption = movie.caption ? movie.caption : '—';
+  await ctx.reply(
+    `✏️ "${code}" kinosi uchun yangi izoh yuboring.\n\n` +
+    `Hozirgi izoh: ${currentCaption}\n\n` +
+    `Izohni o'chirish uchun - (tire) yuboring.\n` +
+    `Bekor qilish uchun /admin yuboring.`
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -512,6 +535,36 @@ bot.on('message', async (ctx, next) => {
   if (adminState.mode === 'BROADCAST_WAIT_MESSAGE') {
     resetAdminState();
     await runBroadcast(ctx, msg.chat.id, msg.message_id);
+    return;
+  }
+
+  // ---- 6) Kino izohini o'zgartirish: yangi izoh kutilmoqda ----
+  if (adminState.mode === 'EDIT_CAPTION_WAIT_TEXT') {
+    const newCaption = msg.text && msg.text.trim();
+    if (!newCaption) {
+      return ctx.reply('⚠️ Iltimos, matn yuboring.');
+    }
+
+    const code = adminState.temp.code;
+    const movie = await Movie.findOne({ code });
+    if (!movie) {
+      resetAdminState();
+      return ctx.reply('⚠️ Kino topilmadi (o\'chirilgan bo\'lishi mumkin).');
+    }
+
+    // Tireni izohni tozalash uchun ishlatish
+    movie.caption = newCaption === '-' ? '' : newCaption;
+    await movie.save();
+
+    resetAdminState();
+    await ctx.reply(
+      `✅ Kino izoh muvaffaqiyatli yangilandi!
+
+` +
+      `🔢 Kod: ${movie.code}
+` +
+      `📝 Yangi izoh: ${movie.caption ? movie.caption : '—'}`
+    );
     return;
   }
 
